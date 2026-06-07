@@ -1,3 +1,5 @@
+import base64
+import json
 import os
 import requests
 
@@ -15,12 +17,50 @@ def _headers():
     }
 
 
-def get_person_id():
-    """Return the authenticated member's LinkedIn person ID using /v2/me."""
-    resp = requests.get(f"{API_BASE}/me", headers=_headers(), timeout=15)
-    if resp.status_code != 200:
-        raise RuntimeError(f"Could not fetch profile: {resp.status_code} {resp.text}")
-    return resp.json()["id"]
+def _decode_jwt_sub(token: str) -> str | None:
+    """
+    Decode the 'sub' (subject = person ID) from a LinkedIn JWT access token.
+    No API call or extra scope needed — just base64-decode the payload section.
+    """
+    try:
+        parts = token.split(".")
+        if len(parts) != 3:
+            return None
+        # JWT payload is base64url — fix padding then decode
+        padded = parts[1] + "=" * (4 - len(parts[1]) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded))
+        return str(payload["sub"]) if "sub" in payload else None
+    except Exception:
+        return None
+
+
+def get_person_id() -> str:
+    """
+    Return the LinkedIn member's person ID.
+
+    Strategy (no r_liteprofile / openid scope required):
+      1. Decode the JWT access token and read the 'sub' claim directly.
+      2. Fall back to the LINKEDIN_PERSON_ID env var if token is opaque.
+    """
+    token = os.environ.get("LINKEDIN_ACCESS_TOKEN", "")
+
+    person_id = _decode_jwt_sub(token)
+    if person_id:
+        print(f"Person ID decoded from token (last 6): ...{person_id[-6:]}")
+        return person_id
+
+    # Fallback: explicit env var (user sets this once in GitHub secrets)
+    person_id = os.environ.get("LINKEDIN_PERSON_ID", "").strip()
+    if person_id:
+        print(f"Person ID from LINKEDIN_PERSON_ID secret")
+        return person_id
+
+    raise RuntimeError(
+        "Cannot determine LinkedIn Person ID.\n"
+        "Your access token is not a JWT or the 'sub' claim is missing.\n"
+        "Fix: add LINKEDIN_PERSON_ID to your GitHub secrets.\n"
+        "Find your ID: open LinkedIn in browser → view page source → search for 'voyagerIdentityDashProfilesByMemberIdentity' or check LINKEDIN_SETUP.md"
+    )
 
 
 def _register_image_upload(person_id):
