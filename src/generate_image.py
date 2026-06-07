@@ -1,8 +1,11 @@
+import hashlib
+import os
 import tempfile
 import urllib.parse
 import requests
 
-# Pollinations.ai blocks bare server requests but accepts browser-like User-Agents.
+# ── Layer 1: Pollinations.ai (free but blocks many CI IPs) ──────────────────
+
 _BROWSER_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -11,51 +14,91 @@ _BROWSER_HEADERS = {
     ),
     "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
     "Referer": "https://pollinations.ai/",
-    "Accept-Language": "en-US,en;q=0.9",
 }
 
 
-def _try_download(url: str) -> bytes | None:
-    """Try GET on a URL; return image bytes on success, None otherwise."""
-    try:
-        resp = requests.get(url, headers=_BROWSER_HEADERS, timeout=90)
-        if resp.status_code == 200 and "image" in resp.headers.get("Content-Type", ""):
-            return resp.content
-        print(f"      [{resp.status_code}] {url[:80]}")
-    except Exception as e:
-        print(f"      [ERR] {url[:80]} — {e}")
+def _pollinations(prompt: str) -> bytes | None:
+    encoded = urllib.parse.quote(prompt)
+    base = f"https://image.pollinations.ai/prompt/{encoded}"
+    for url in [f"{base}?width=1024&height=1024&nologo=true", base]:
+        try:
+            r = requests.get(url, headers=_BROWSER_HEADERS, timeout=60)
+            if r.status_code == 200 and "image" in r.headers.get("Content-Type", ""):
+                return r.content
+            print(f"      Pollinations [{r.status_code}]")
+        except Exception as e:
+            print(f"      Pollinations error: {e}")
     return None
 
 
+# ── Layer 2: Hugging Face Inference API (free account needed → HF_TOKEN) ────
+# Sign up free at https://huggingface.co → Settings → Access Tokens → New token
+# Add HF_TOKEN to GitHub secrets. Skip this layer if token not set.
+
+_HF_MODEL = "black-forest-labs/FLUX.1-schnell"
+
+
+def _huggingface(prompt: str) -> bytes | None:
+    hf_token = os.environ.get("HF_TOKEN", "").strip()
+    if not hf_token:
+        return None  # layer not configured — skip silently
+    try:
+        url = f"https://api-inference.huggingface.co/models/{_HF_MODEL}"
+        headers = {"Authorization": f"Bearer {hf_token}"}
+        r = requests.post(url, headers=headers, json={"inputs": prompt}, timeout=120)
+        if r.status_code == 200 and "image" in r.headers.get("Content-Type", ""):
+            print("      Hugging Face image generated ✓")
+            return r.content
+        print(f"      Hugging Face [{r.status_code}]: {r.text[:120]}")
+    except Exception as e:
+        print(f"      Hugging Face error: {e}")
+    return None
+
+
+# ── Layer 3: Picsum Photos (guaranteed — no key, always returns an image) ───
+# Beautiful high-quality stock photos. Seed is derived from the prompt text
+# so the same topic always gets the same photo (consistent per post topic).
+
+def _picsum(prompt: str) -> bytes | None:
+    seed = int(hashlib.md5(prompt.encode()).hexdigest()[:8], 16) % 1000
+    url = f"https://picsum.photos/seed/{seed}/1200/627"
+    try:
+        r = requests.get(url, timeout=30, allow_redirects=True)
+        if r.status_code == 200 and "image" in r.headers.get("Content-Type", ""):
+            print("      Picsum fallback image used ✓")
+            return r.content
+        print(f"      Picsum [{r.status_code}]")
+    except Exception as e:
+        print(f"      Picsum error: {e}")
+    return None
+
+
+# ── Public entry point ────────────────────────────────────────────────────────
+
 def generate_image(prompt: str) -> str:
     """
-    Generate an image via Pollinations.ai (free, no API key needed).
-    Returns the path to a saved JPEG temp file.
+    Generate an image for the LinkedIn post.
+    Tries three sources in order — always succeeds unless network is down.
 
-    Tries multiple URL formats in order — Pollinations.ai sometimes 402s
-    on certain param combos when called from server IPs, so we fall through.
+      1. Pollinations.ai   — AI-generated, free (may block CI IPs)
+      2. Hugging Face      — AI-generated, free with HF_TOKEN secret
+      3. Picsum Photos     — stock photo, always free, no key needed
+
+    Returns the path to a temporary JPEG file.
     """
-    encoded = urllib.parse.quote(prompt)
-    base = f"https://image.pollinations.ai/prompt/{encoded}"
-
-    attempts = [
-        f"{base}?width=1024&height=1024&nologo=true",  # preferred size
-        f"{base}?width=800&height=800&nologo=true",     # smaller fallback
-        f"{base}?nologo=true",                          # minimal params
-        base,                                           # bare URL, no params
-    ]
-
     print(f"Generating image for: {prompt[:70]}...")
-    for url in attempts:
-        data = _try_download(url)
+
+    for label, fn in [
+        ("Pollinations.ai", _pollinations),
+        ("Hugging Face",    _huggingface),
+        ("Picsum Photos",   _picsum),
+    ]:
+        data = fn(prompt)
         if data:
             tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
             tmp.write(data)
             tmp.close()
-            print(f"Image saved → {tmp.name} ({len(data) // 1024} KB)")
+            print(f"      [{label}] Image saved → {tmp.name} ({len(data) // 1024} KB)")
             return tmp.name
 
-    raise RuntimeError(
-        "All Pollinations.ai attempts failed (service may be blocking CI IPs). "
-        "Post will be text-only."
-    )
+    raise RuntimeError("All image sources failed. Check network connectivity.")
