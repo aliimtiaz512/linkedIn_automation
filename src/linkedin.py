@@ -36,30 +36,52 @@ def _decode_jwt_sub(token: str) -> str | None:
 
 def get_person_id() -> str:
     """
-    Return the LinkedIn member's person ID.
+    Return the LinkedIn member's person ID. Tries three methods in order:
 
-    Strategy (no r_liteprofile / openid scope required):
-      1. Decode the JWT access token and read the 'sub' claim directly.
-      2. Fall back to the LINKEDIN_PERSON_ID env var if token is opaque.
+      1. /v2/userinfo  — works when token has 'openid profile' scope (new apps)
+      2. JWT decode    — works when access token is a JWT with 'sub' claim
+      3. LINKEDIN_PERSON_ID env var — permanent manual fallback
     """
     token = os.environ.get("LINKEDIN_ACCESS_TOKEN", "")
 
+    # ── Method 1: /v2/userinfo (openid + profile scope) ──────────────────────
+    try:
+        resp = requests.get(
+            "https://api.linkedin.com/v2/userinfo",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            person_id = resp.json().get("sub", "")
+            if person_id:
+                print(f"Person ID from /v2/userinfo: ...{person_id[-6:]}")
+                return person_id
+        else:
+            print(f"userinfo [{resp.status_code}] — trying next method")
+    except Exception as e:
+        print(f"userinfo error: {e}")
+
+    # ── Method 2: decode JWT token payload ───────────────────────────────────
     person_id = _decode_jwt_sub(token)
     if person_id:
-        print(f"Person ID decoded from token (last 6): ...{person_id[-6:]}")
+        print(f"Person ID from JWT token: ...{person_id[-6:]}")
         return person_id
 
-    # Fallback: explicit env var (user sets this once in GitHub secrets)
+    # ── Method 3: explicit env var (set once in GitHub secrets) ──────────────
     person_id = os.environ.get("LINKEDIN_PERSON_ID", "").strip()
     if person_id:
-        print(f"Person ID from LINKEDIN_PERSON_ID secret")
+        print("Person ID from LINKEDIN_PERSON_ID secret")
         return person_id
 
     raise RuntimeError(
         "Cannot determine LinkedIn Person ID.\n"
-        "Your access token is not a JWT or the 'sub' claim is missing.\n"
-        "Fix: add LINKEDIN_PERSON_ID to your GitHub secrets.\n"
-        "Find your ID: open LinkedIn in browser → view page source → search for 'voyagerIdentityDashProfilesByMemberIdentity' or check LINKEDIN_SETUP.md"
+        "Your token needs 'openid profile' scope. Re-generate it using:\n"
+        "https://www.linkedin.com/oauth/v2/authorization?response_type=code"
+        "&client_id=YOUR_CLIENT_ID"
+        "&redirect_uri=https://oauth.pstmn.io/v1/callback"
+        "&scope=openid%20profile%20w_member_social\n"
+        "Then run: python scripts/get_linkedin_id.py\n"
+        "And add the printed ID as LINKEDIN_PERSON_ID in GitHub secrets."
     )
 
 
