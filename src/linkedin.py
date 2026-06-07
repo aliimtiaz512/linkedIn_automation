@@ -16,11 +16,11 @@ def _headers():
 
 
 def get_person_id():
-    """Return the authenticated member's LinkedIn person ID."""
-    resp = requests.get(f"{API_BASE}/userinfo", headers=_headers(), timeout=15)
+    """Return the authenticated member's LinkedIn person ID using /v2/me."""
+    resp = requests.get(f"{API_BASE}/me", headers=_headers(), timeout=15)
     if resp.status_code != 200:
         raise RuntimeError(f"Could not fetch profile: {resp.status_code} {resp.text}")
-    return resp.json()["sub"]
+    return resp.json()["id"]
 
 
 def _register_image_upload(person_id):

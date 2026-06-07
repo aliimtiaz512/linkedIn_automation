@@ -13,12 +13,11 @@ def generate_image(prompt: str) -> str:
     """
     encoded = urllib.parse.quote(prompt)
     url = POLLINATIONS_URL.format(prompt=encoded)
+    # No model param = Pollinations.ai default free model (flux is paid)
     params = {
         "width": 1024,
         "height": 1024,
         "nologo": "true",
-        "model": "flux",
-        "enhance": "true",
     }
 
     print(f"Generating image for: {prompt[:60]}...")
